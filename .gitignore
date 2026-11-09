@@ -1,0 +1,27 @@
+# Environment files (exclude all .env* except .env.example)
+.env*
+!.env.example
+
+# Python cache & compiled bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing & quality caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local cache stores & temporary files
+.cache_store.json
+desktop_screen_fast.jpg
+*.tmp
+*.log
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
