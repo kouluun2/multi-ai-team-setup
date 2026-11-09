@@ -25,7 +25,7 @@ from student_frugal_guide import (  # noqa: E402
     normalize_model_name,
     simulate_student_month,
 )
-from ai_team_gate import check_frugal_guard, record_frugal_spend  # noqa: E402
+from ai_team_gate import check_frugal_guard, handle_review, record_frugal_spend  # noqa: E402
 
 
 class TestCostCalculator:
@@ -91,6 +91,35 @@ class TestCostCalculator:
         assert pytest.approx(res.cost_usd, rel=1e-4) == 0.012
         assert pytest.approx(res.cost_jpy, rel=1e-4) == 1.86
         assert "diff" in res.description.lower()
+
+    def test_negative_tokens_rejected(self):
+        calc = CostCalculator(usd_jpy_rate=155.0)
+        with pytest.raises(ValueError, match="Token counts must be non-negative"):
+            calc.calculate("deepseek-flash", input_tokens=-1, output_tokens=100)
+        with pytest.raises(ValueError, match="Token counts must be non-negative"):
+            calc.calculate("deepseek-flash", input_tokens=100, output_tokens=-5)
+        with pytest.raises(ValueError, match="Token counts must be non-negative"):
+            calc.calculate("deepseek-flash", input_tokens=100, output_tokens=100, cache_hit_tokens=-10)
+
+    def test_cache_hit_clamped_to_input(self):
+        calc = CostCalculator(usd_jpy_rate=150.0)
+        # cache_hit_tokens exceeds input_tokens -> clamped to input_tokens
+        res = calc.calculate("deepseek-flash", input_tokens=1000, output_tokens=500, cache_hit_tokens=2000)
+        assert res.cache_hit_tokens == 1000
+        # effective input is 0, cache hit is 1000
+        expected_usd = (1000 * 0.075 + 500 * 1.20) / 1_000_000.0
+        assert pytest.approx(res.cost_usd, rel=1e-4) == expected_usd
+
+    def test_safe_env_usd_jpy_rate(self, monkeypatch):
+        # 不正な文字列が設定された場合はデフォルト(155.0)へ安全にフォールバック
+        monkeypatch.setenv("USD_JPY_RATE", "invalid_rate")
+        calc1 = CostCalculator()
+        assert calc1.usd_jpy == 155.0
+
+        # 0以下の値が設定された場合もデフォルトへフォールバック
+        monkeypatch.setenv("USD_JPY_RATE", "-100.5")
+        calc2 = CostCalculator()
+        assert calc2.usd_jpy == 155.0
 
 
 class TestBudgetGovernor:
@@ -197,6 +226,84 @@ class TestBudgetGovernor:
         gov.reset_ledger()
         assert gov.get_status()["total_spent_jpy"] == 0.0
         assert gov.get_status()["call_count"] == 0
+
+    def test_corrupted_ledger_fail_closed_blocking(self, temp_ledger):
+        # 破損したJSONファイルを書き込む
+        temp_ledger.write_text("{corrupted_json_content...", encoding="utf-8")
+
+        gov = BudgetGovernor(ledger_path=temp_ledger, budget_jpy=100.0)
+
+        # 有料モデル呼び出しはフェイルクローズで即座にブロック
+        can_proceed, reason, est_cost = gov.can_call("claude-opus-5-5")
+        assert can_proceed is False
+        assert est_cost == 0.0
+        assert "台帳ファイルが破損しているため安全に有料APIをブロックしました（フェイルクローズ）。修復またはリセットを行ってください。" in reason
+        assert gov.is_corrupted is True
+
+        # バックアップファイルが作成されていること (.corrupted.<timestamp>)
+        corrupted_backups = list(temp_ledger.parent.glob(f"{temp_ledger.name}.corrupted.*"))
+        assert len(corrupted_backups) >= 1
+        assert corrupted_backups[0].read_text(encoding="utf-8") == "{corrupted_json_content..."
+
+        # 無料モデル呼び出しは破損時でも許可されること
+        free_can, free_reason, free_cost = gov.can_call("gemini-3.8-flash")
+        assert free_can is True
+        assert free_cost == 0.0
+        assert "完全無料枠モデル" in free_reason
+
+        # 破損状態での記録呼び出しは拒否されること
+        with pytest.raises(RuntimeError, match="破損しているため記録できません"):
+            gov.record_call("claude-opus-5-5", 100, 100)
+
+        # ステータスも破損状態を反映していること
+        status = gov.get_status()
+        assert status["is_corrupted"] is True
+        assert status["is_exceeded"] is True
+
+    def test_atomic_tmp_file_save(self, temp_ledger):
+        gov = BudgetGovernor(ledger_path=temp_ledger, budget_jpy=100.0)
+        test_data = {
+            "month": gov.current_month(),
+            "budget_jpy": 100.0,
+            "total_spent_jpy": 10.0,
+            "total_spent_usd": 0.065,
+            "call_count": 1,
+            "calls": [],
+        }
+        gov.save_ledger(test_data)
+
+        # 台帳ファイルが正しく存在し内容が一致すること
+        assert temp_ledger.exists()
+        loaded = json.loads(temp_ledger.read_text(encoding="utf-8"))
+        assert loaded["total_spent_jpy"] == 10.0
+
+        # ディレクトリ内に孤立した .tmp 一時ファイルが残っていないこと
+        leftover_tmps = list(temp_ledger.parent.glob(".frugal_*.tmp"))
+        assert len(leftover_tmps) == 0
+
+    def test_negative_token_and_cost_rejection(self, temp_ledger):
+        gov = BudgetGovernor(ledger_path=temp_ledger, budget_jpy=100.0)
+        with pytest.raises(ValueError, match="Token counts must be non-negative"):
+            gov.record_call("deepseek-flash", input_tokens=-10, output_tokens=500)
+        with pytest.raises(ValueError, match="Token counts must be non-negative"):
+            gov.record_call("deepseek-flash", input_tokens=100, output_tokens=-5)
+        with pytest.raises(ValueError, match="Token counts must be non-negative"):
+            gov.record_call("deepseek-flash", input_tokens=100, output_tokens=100, cache_hit_tokens=-1)
+        with pytest.raises(ValueError, match="cost_jpy cannot be negative"):
+            gov.record_call("deepseek-flash", input_tokens=100, output_tokens=100, cost_jpy=-1.0, cost_usd=0.01)
+        with pytest.raises(ValueError, match="cost_usd cannot be negative"):
+            gov.record_call("deepseek-flash", input_tokens=100, output_tokens=100, cost_jpy=1.0, cost_usd=-0.01)
+
+    def test_safe_env_budget_jpy(self, monkeypatch, temp_ledger):
+        # 不正な文字列の場合はデフォルト(100.0)へフォールバック
+        monkeypatch.setenv("FRUGAL_BUDGET_JPY", "corrupted_budget_string")
+        gov1 = BudgetGovernor(ledger_path=temp_ledger)
+        assert gov1.budget_jpy == 100.0
+
+        # 0未満の値の場合はデフォルトへフォールバック
+        monkeypatch.setenv("FRUGAL_BUDGET_JPY", "-50.0")
+        gov2 = BudgetGovernor(ledger_path=temp_ledger)
+        assert gov2.budget_jpy == 100.0
 
 
 class TestDoctorCheck:
@@ -388,4 +495,67 @@ class TestGatekeeperFrugalIntegration:
         captured = capsys.readouterr().out
         assert "Frugal Governor" in captured
         assert "当月利用額" in captured
+
+    def test_check_frugal_guard_fail_closed_when_guide_missing(self, monkeypatch, capsys):
+        monkeypatch.setattr("ai_team_gate.HAS_FRUGAL_GUIDE", False)
+        with pytest.raises(SystemExit) as exc_info:
+            check_frugal_guard("claude-opus-5-5", frugal=True)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr().err
+        assert "[Error] --frugal が要求されましたが student_frugal_guide モジュールが読み込めないため、安全に停止します（フェイルクローズ）。" in captured
+
+    def test_handle_review_records_frugal_spend_for_all_models(self, monkeypatch, tmp_path):
+        ledger = tmp_path / "frugal_review_ledger.json"
+        gov = BudgetGovernor(ledger_path=ledger, budget_jpy=100.0)
+
+        monkeypatch.setattr("ai_team_gate.BudgetGovernor", lambda: gov)
+        monkeypatch.setattr("ai_team_gate.run_cmd", lambda cmd, cwd=None: (0, "diff --git a/a.py b/a.py\n+val = 1\n", ""))
+        monkeypatch.setattr("ai_team_gate.split_diff_blocks", lambda diff: [("a.py", diff)])
+
+        # 1. Claude Opus review mock
+        monkeypatch.setattr("ai_team_gate.ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setattr("ai_team_gate.HAS_LITELLM", False)
+
+        mock_claude_resp = io.BytesIO(
+            json.dumps({
+                "content": [{"type": "text", "text": "Claude diff audit OK"}],
+                "usage": {"input_tokens": 300, "output_tokens": 150, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+            }).encode("utf-8")
+        )
+        with patch("urllib.request.urlopen", return_value=mock_claude_resp):
+            handle_review(repo_path=str(tmp_path), model="claude-opus-5-5", frugal=True)
+
+        status_claude = gov.get_status()
+        assert status_claude["call_count"] == 1
+        assert "claude-opus-5-5" in status_claude["models"]
+
+        # 2. GPT review mock
+        monkeypatch.setattr("ai_team_gate.OPENAI_API_KEY", "test-key")
+        mock_gpt_resp = io.BytesIO(
+            json.dumps({
+                "choices": [{"message": {"content": "GPT diff audit OK"}}],
+                "usage": {"prompt_tokens": 400, "completion_tokens": 200}
+            }).encode("utf-8")
+        )
+        with patch("urllib.request.urlopen", return_value=mock_gpt_resp):
+            handle_review(repo_path=str(tmp_path), model="gpt-6.1-sol", frugal=True)
+
+        status_gpt = gov.get_status()
+        assert status_gpt["call_count"] == 2
+        assert "gpt-6-1-sol" in status_gpt["models"]
+
+        # 3. Gemini review mock
+        monkeypatch.setattr("ai_team_gate.GEMINI_API_KEY", "test-key")
+        mock_gemini_resp = io.BytesIO(
+            json.dumps({
+                "candidates": [{"content": {"parts": [{"text": "Gemini review OK"}]}}],
+                "usageMetadata": {"promptTokenCount": 500, "candidatesTokenCount": 250}
+            }).encode("utf-8")
+        )
+        with patch("urllib.request.urlopen", return_value=mock_gemini_resp):
+            handle_review(repo_path=str(tmp_path), model="gemini-4-argon", frugal=True)
+
+        status_gemini = gov.get_status()
+        assert status_gemini["call_count"] == 3
+        assert "gemini-4-argon" in status_gemini["models"]
 

@@ -95,8 +95,15 @@ def check_frugal_guard(model: str, est_in: int = 500, est_out: int = 500, frugal
     月額100円上限を超過した場合は有料SOTA呼び出しを安全にブロックする。
     """
     is_frugal_active = frugal or (os.environ.get("AI_TEAM_FRUGAL", "").lower() in ("1", "true", "yes"))
-    if not is_frugal_active or not HAS_FRUGAL_GUIDE:
+    if not is_frugal_active:
         return True, None
+
+    if not HAS_FRUGAL_GUIDE:
+        print(
+            "[Error] --frugal が要求されましたが student_frugal_guide モジュールが読み込めないため、安全に停止します（フェイルクローズ）。",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_GATE_FAIL)
 
     gov = BudgetGovernor()
     can_proceed, reason, est_cost = gov.can_call(model, estimated_input_tokens=est_in, estimated_output_tokens=est_out)
@@ -540,7 +547,18 @@ Output your final critique in clear, professional Japanese for the engineering t
                 cost_usd = completion_cost(completion_response=resp)
                 cost_jpy = cost_usd * USD_JPY
                 u = resp.usage
-                print(f"\n[コスト情報] モデル: {api_model} | 入力: {u.prompt_tokens} | 出力: {u.completion_tokens} | 費用(自動計算): 約{cost_jpy:.2f}円 (${cost_usd:.5f})")
+                in_tok = getattr(u, "prompt_tokens", 0) or 0
+                out_tok = getattr(u, "completion_tokens", 0) or 0
+                print(f"\n[コスト情報] モデル: {api_model} | 入力: {in_tok} | 出力: {out_tok} | 費用(自動計算): 約{cost_jpy:.2f}円 (${cost_usd:.5f})")
+                record_frugal_spend(
+                    gov,
+                    api_model,
+                    in_tok,
+                    out_tok,
+                    cost_jpy=cost_jpy,
+                    cost_usd=cost_usd,
+                    desc="OpenAI Review Diff Audit (LiteLLM)",
+                )
                 return
             except Exception as e:
                 print(f"[Warning] LiteLLM 呼び出しフォールバック: {e}", file=sys.stderr)
@@ -579,6 +597,15 @@ Output your final critique in clear, professional Japanese for the engineering t
                 cost_usd = (in_tok * 2.0 + out_tok * 10.0) / 1_000_000
                 cost_jpy = cost_usd * USD_JPY
                 print(f"\n[コスト情報] モデル: {api_model} | 入力: {in_tok} | 出力: {out_tok} | 概算費用: 約{cost_jpy:.2f}円 (${cost_usd:.4f})")
+                record_frugal_spend(
+                    gov,
+                    api_model,
+                    in_tok,
+                    out_tok,
+                    cost_jpy=cost_jpy,
+                    cost_usd=cost_usd,
+                    desc="OpenAI Review Diff Audit",
+                )
         except urllib.error.HTTPError as e:
             err_msg = e.read().decode("utf-8", errors="replace")
             print(f"[Error] OpenAI APIエラー ({e.code}): {err_msg}", file=sys.stderr)
@@ -629,7 +656,18 @@ Output your final critique in clear, professional Japanese for the engineering t
             cost_usd = completion_cost(completion_response=resp)
             cost_jpy = cost_usd * USD_JPY
             u = resp.usage
-            print(f"\n[コスト情報] モデル: {model} | 入力: {u.prompt_tokens} | 出力: {u.completion_tokens} | 費用(自動計算): 約{cost_jpy:.2f}円 (${cost_usd:.5f})")
+            in_tok = getattr(u, "prompt_tokens", 0) or 0
+            out_tok = getattr(u, "completion_tokens", 0) or 0
+            print(f"\n[コスト情報] モデル: {model} | 入力: {in_tok} | 出力: {out_tok} | 費用(自動計算): 約{cost_jpy:.2f}円 (${cost_usd:.5f})")
+            record_frugal_spend(
+                gov,
+                model,
+                in_tok,
+                out_tok,
+                cost_jpy=cost_jpy,
+                cost_usd=cost_usd,
+                desc="Claude Review Diff Audit (LiteLLM)",
+            )
             return
         except Exception as e:
             print(f"[Warning] LiteLLM 呼び出しフォールバック: {e}", file=sys.stderr)
@@ -701,6 +739,16 @@ Output your final critique in clear, professional Japanese for the engineering t
             cost_usd = (in_tok * rate_in + out_tok * rate_out + c_create * (rate_in * 1.25) + c_read * (rate_in * 0.1)) / 1_000_000
             cost_jpy = cost_usd * USD_JPY
             print(f"\n[コスト情報] モード: {mode_label} | 入力: {in_tok} (キャッシュ作成: {c_create}, 読込: {c_read}) | 出力/思考: {out_tok} | 概算費用: 約{cost_jpy:.2f}円 (${cost_usd:.4f})")
+            record_frugal_spend(
+                gov,
+                model,
+                in_tok,
+                out_tok,
+                cache_hit=c_read,
+                cost_jpy=cost_jpy,
+                cost_usd=cost_usd,
+                desc=f"Claude Review Diff Audit ({mode_label})",
+            )
     except urllib.error.HTTPError as e:
         err_msg = e.read().decode("utf-8", errors="replace")
         print(f"[Error] Anthropic APIエラー ({e.code}): {err_msg}", file=sys.stderr)

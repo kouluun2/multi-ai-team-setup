@@ -15,7 +15,9 @@ import argparse
 import datetime
 import json
 import os
+import shutil
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -118,9 +120,22 @@ class CostCalculator:
 
     def __init__(self, usd_jpy_rate: Optional[float] = None) -> None:
         if usd_jpy_rate is not None:
-            self.usd_jpy = float(usd_jpy_rate)
+            try:
+                self.usd_jpy = float(usd_jpy_rate)
+            except (ValueError, TypeError):
+                self.usd_jpy = float(DEFAULT_USD_JPY_RATE)
         else:
-            self.usd_jpy = float(os.environ.get("USD_JPY_RATE", str(DEFAULT_USD_JPY_RATE)))
+            raw_val = os.environ.get("USD_JPY_RATE")
+            if raw_val is not None:
+                try:
+                    self.usd_jpy = float(raw_val)
+                except (ValueError, TypeError):
+                    self.usd_jpy = float(DEFAULT_USD_JPY_RATE)
+            else:
+                self.usd_jpy = float(DEFAULT_USD_JPY_RATE)
+
+        if self.usd_jpy <= 0:
+            self.usd_jpy = float(DEFAULT_USD_JPY_RATE)
 
     def calculate(
         self,
@@ -131,6 +146,10 @@ class CostCalculator:
         description: str = "",
     ) -> CostResult:
         """指定モデルとトークン数から正確なコストを計算する。"""
+        if input_tokens < 0 or output_tokens < 0 or cache_hit_tokens < 0:
+            raise ValueError("Token counts must be non-negative")
+
+        cache_hit_tokens = min(cache_hit_tokens, input_tokens)
         norm_model = normalize_model_name(model)
         rate_info = MODEL_RATES.get(norm_model)
 
@@ -209,6 +228,7 @@ class BudgetGovernor:
         budget_jpy: Optional[float] = None,
         calculator: Optional[CostCalculator] = None,
     ) -> None:
+        self.is_corrupted: bool = False
         if ledger_path is not None:
             self.ledger_path = Path(ledger_path)
         else:
@@ -216,10 +236,22 @@ class BudgetGovernor:
             self.ledger_path = default_dir / ".frugal_ledger.json"
 
         if budget_jpy is not None:
-            self.budget_jpy = float(budget_jpy)
+            try:
+                self.budget_jpy = float(budget_jpy)
+            except (ValueError, TypeError):
+                self.budget_jpy = float(DEFAULT_FRUGAL_BUDGET_JPY)
         else:
             env_val = os.environ.get("FRUGAL_BUDGET_JPY")
-            self.budget_jpy = float(env_val) if env_val else DEFAULT_FRUGAL_BUDGET_JPY
+            if env_val is not None:
+                try:
+                    self.budget_jpy = float(env_val)
+                except (ValueError, TypeError):
+                    self.budget_jpy = float(DEFAULT_FRUGAL_BUDGET_JPY)
+            else:
+                self.budget_jpy = float(DEFAULT_FRUGAL_BUDGET_JPY)
+
+        if self.budget_jpy < 0:
+            self.budget_jpy = float(DEFAULT_FRUGAL_BUDGET_JPY)
 
         self.calculator = calculator or CostCalculator()
 
@@ -237,13 +269,33 @@ class BudgetGovernor:
         try:
             with open(self.ledger_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("Ledger content must be a JSON object")
             if data.get("month") != now_month:
                 # 月が替わったため当月用にアーカイブ＆リフレッシュ
                 return self._init_new_ledger(now_month, previous_record=data)
             return data
         except Exception:
-            # 破損等の場合は新規初期化
-            return self._init_new_ledger(now_month)
+            # 破損検出: 支出を0 JPYにリセットせず、フェイルクローズとする
+            if not self.is_corrupted:
+                self.is_corrupted = True
+                try:
+                    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    backup_name = f"{self.ledger_path.name}.corrupted.{ts}"
+                    backup_path = self.ledger_path.parent / backup_name
+                    shutil.copy2(self.ledger_path, backup_path)
+                except Exception:
+                    pass
+
+            return {
+                "month": now_month,
+                "budget_jpy": self.budget_jpy,
+                "total_spent_jpy": float("inf"),
+                "total_spent_usd": float("inf"),
+                "call_count": 0,
+                "calls": [],
+                "is_corrupted": True,
+            }
 
     def _init_new_ledger(self, month: str, previous_record: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """新規月の台帳を作成して保存する。"""
@@ -267,10 +319,28 @@ class BudgetGovernor:
     def save_ledger(self, data: Dict[str, Any]) -> None:
         """台帳を安全にアトミック保存する。"""
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.ledger_path.with_suffix(".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        tmp_path.replace(self.ledger_path)
+        tmp_name = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=self.ledger_path.parent,
+                prefix=".frugal_",
+                suffix=".tmp",
+                encoding="utf-8",
+                delete=False,
+            ) as tmp_file:
+                json.dump(data, tmp_file, ensure_ascii=False, indent=2)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+                tmp_name = tmp_file.name
+            os.replace(tmp_name, self.ledger_path)
+        except Exception:
+            if tmp_name and os.path.exists(tmp_name):
+                try:
+                    os.remove(tmp_name)
+                except OSError:
+                    pass
+            raise
 
     def can_call(
         self,
@@ -290,6 +360,13 @@ class BudgetGovernor:
         if rate_info.get("is_free", False):
             return True, f"完全無料枠モデル（{norm_model}）のため無制限に実行可能です。", 0.0
 
+        if self.is_corrupted:
+            return (
+                False,
+                "台帳ファイルが破損しているため安全に有料APIをブロックしました（フェイルクローズ）。修復またはリセットを行ってください。",
+                0.0,
+            )
+
         est_res = self.calculator.calculate(
             model=norm_model,
             input_tokens=estimated_input_tokens,
@@ -298,6 +375,13 @@ class BudgetGovernor:
         est_cost_jpy = est_res.cost_jpy
 
         ledger = self.load_ledger()
+        if self.is_corrupted:
+            return (
+                False,
+                "台帳ファイルが破損しているため安全に有料APIをブロックしました（フェイルクローズ）。修復またはリセットを行ってください。",
+                0.0,
+            )
+
         current_spent = float(ledger.get("total_spent_jpy", 0.0))
         budget = float(ledger.get("budget_jpy", self.budget_jpy))
 
@@ -326,6 +410,20 @@ class BudgetGovernor:
         description: str = "",
     ) -> Dict[str, Any]:
         """実行完了したAPI呼び出しの支出を記録する。"""
+        if input_tokens < 0 or output_tokens < 0 or cache_hit_tokens < 0:
+            raise ValueError("Token counts must be non-negative")
+
+        cache_hit_tokens = min(cache_hit_tokens, input_tokens)
+
+        if cost_jpy is not None and cost_jpy < 0:
+            raise ValueError("cost_jpy cannot be negative")
+
+        if cost_usd is not None and cost_usd < 0:
+            raise ValueError("cost_usd cannot be negative")
+
+        if self.is_corrupted:
+            raise RuntimeError("台帳ファイルが破損しているため記録できません（フェイルクローズ）。")
+
         norm_model = normalize_model_name(model)
 
         if cost_jpy is None or cost_usd is None:
@@ -343,6 +441,9 @@ class BudgetGovernor:
             c_usd = float(cost_usd)
 
         ledger = self.load_ledger()
+        if self.is_corrupted:
+            raise RuntimeError("台帳ファイルが破損しているため記録できません（フェイルクローズ）。")
+
         entry = {
             "timestamp": datetime.datetime.now().isoformat(),
             "model": norm_model,
@@ -365,6 +466,20 @@ class BudgetGovernor:
     def get_status(self) -> Dict[str, Any]:
         """現在の月額予算利用状況サマリーを取得する。"""
         ledger = self.load_ledger()
+        if self.is_corrupted:
+            return {
+                "month": self.current_month(),
+                "budget_jpy": self.budget_jpy,
+                "total_spent_jpy": 0.0,
+                "total_spent_usd": 0.0,
+                "remaining_jpy": 0.0,
+                "usage_percent": 100.0,
+                "call_count": 0,
+                "is_exceeded": True,
+                "is_corrupted": True,
+                "models": {},
+            }
+
         spent_jpy = float(ledger.get("total_spent_jpy", 0.0))
         budget = float(ledger.get("budget_jpy", self.budget_jpy))
         remaining = max(0.0, budget - spent_jpy)
@@ -394,6 +509,7 @@ class BudgetGovernor:
 
     def reset_ledger(self, month: Optional[str] = None) -> None:
         """台帳を初期化する（テストまたは強制リセット用）。"""
+        self.is_corrupted = False
         target_month = month or self.current_month()
         self._init_new_ledger(target_month)
 
