@@ -31,6 +31,7 @@ import subprocess
 import argparse
 import urllib.request
 import urllib.error
+from typing import Any, Optional
 
 # Exit code constants
 EXIT_PASS = 0
@@ -80,6 +81,66 @@ try:
     HAS_LITELLM = True
 except ImportError:
     HAS_LITELLM = False
+
+try:
+    from student_frugal_guide import BudgetGovernor
+    HAS_FRUGAL_GUIDE = True
+except ImportError:
+    HAS_FRUGAL_GUIDE = False
+
+
+def check_frugal_guard(model: str, est_in: int = 500, est_out: int = 500, frugal: bool = False) -> tuple[bool, Any]:
+    """
+    けち大学生モード（--frugal / AI_TEAM_FRUGAL=1）の予算統制チェック。
+    月額100円上限を超過した場合は有料SOTA呼び出しを安全にブロックする。
+    """
+    is_frugal_active = frugal or (os.environ.get("AI_TEAM_FRUGAL", "").lower() in ("1", "true", "yes"))
+    if not is_frugal_active or not HAS_FRUGAL_GUIDE:
+        return True, None
+
+    gov = BudgetGovernor()
+    can_proceed, reason, est_cost = gov.can_call(model, estimated_input_tokens=est_in, estimated_output_tokens=est_out)
+    if not can_proceed:
+        print("\n" + "=" * 65, file=sys.stderr)
+        print("🎓 [Frugal Governor] 🚫 月額100円上限ガードが作動しました！", file=sys.stderr)
+        print("=" * 65, file=sys.stderr)
+        for line in reason.splitlines():
+            print(f"  {line}", file=sys.stderr)
+        print("-" * 65, file=sys.stderr)
+        print("💡 推奨アクション: 完全無料枠（Gemini 3.8 Flash / ローカルRTX 4070S Ollama）で実行してください。", file=sys.stderr)
+        print("=" * 65 + "\n", file=sys.stderr)
+        return False, gov
+
+    return True, gov
+
+
+def record_frugal_spend(
+    gov: Any,
+    model: str,
+    in_tok: int,
+    out_tok: int,
+    cache_hit: int = 0,
+    cost_jpy: Optional[float] = None,
+    cost_usd: Optional[float] = None,
+    desc: str = "",
+) -> None:
+    """実行後の支出を Frugal Governor 台帳に記録する。"""
+    if gov is None:
+        return
+    try:
+        gov.record_call(
+            model=model,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_hit_tokens=cache_hit,
+            cost_jpy=cost_jpy,
+            cost_usd=cost_usd,
+            description=desc,
+        )
+        status = gov.get_status()
+        print(f"[Frugal Governor] 💳 当月利用額: {status['total_spent_jpy']:.2f}円 / 残高: {status['remaining_jpy']:.2f}円 (月額上限: {status['budget_jpy']:.1f}円)")
+    except Exception as e:
+        print(f"[Warning] Frugal Governor 台帳記録エラー: {e}", file=sys.stderr)
 
 # パス除外リスト (ファイルおよびディレクトリ)
 DENIED_FILE_PATTERNS = [
@@ -287,7 +348,7 @@ def is_pytest_cov_available() -> bool:
         return code == 0
 
 
-def handle_review(repo_path=None, model="claude-opus-5-5", deep=False, thinking_budget=2048, dry_run=False):
+def handle_review(repo_path=None, model="claude-opus-5-5", deep=False, thinking_budget=2048, dry_run=False, frugal=False):
     cwd = repo_path or os.getcwd()
     mode_label = f"深層思考モード (Extended Thinking {thinking_budget} tokens)" if deep else "通常モード"
     print(f"[Review] リポジトリ差分を抽出中 ({cwd}) [{mode_label}]...", file=sys.stderr)
@@ -388,6 +449,10 @@ Output your final critique in clear, professional Japanese for the engineering t
         print(system_instruction + f"\n\n【Git Diff】\n```diff\n{diff_out}\n```")
         return
 
+    can_proceed, gov = check_frugal_guard(model, est_in=1000, est_out=1000, frugal=frugal)
+    if not can_proceed:
+        return
+
     # Gemini 4 Argon による差分レビュー
     if model.startswith("gemini"):
         if not GEMINI_API_KEY:
@@ -429,6 +494,7 @@ Output your final critique in clear, professional Japanese for the engineering t
                 cost_usd = (in_tok * 2.0 + out_tok * 10.0) / 1_000_000
                 cost_jpy = cost_usd * USD_JPY
                 print(f"\n[コスト情報] モデル: {model} | 入力: {in_tok} | 出力: {out_tok} | 概算費用: 約{cost_jpy:.2f}円 (${cost_usd:.4f})")
+                record_frugal_spend(gov, model, in_tok, out_tok, cost_jpy=cost_jpy, cost_usd=cost_usd, desc="Gemini Review Diff Audit")
         except urllib.error.HTTPError as e:
             err_msg = e.read().decode("utf-8", errors="replace")
             print(f"[Error] Gemini APIエラー ({e.code}): {err_msg}", file=sys.stderr)
@@ -650,7 +716,7 @@ Output your final critique in clear, professional Japanese for the engineering t
         sys.exit(EXIT_API_FAILURE)
 
 
-def handle_logic(problem_desc, model="deepseek-flash"):
+def handle_logic(problem_desc, model="deepseek-flash", frugal=False):
     # モデルエイリアス正規化 & 単価設定
     # deepseek-v4-pro / deepseek-pro: 1.6T MoE ($0.43 / $0.87 per 1M)
     # deepseek-flash: 552B MoE ($0.30 / $1.20 per 1M)
@@ -662,6 +728,9 @@ def handle_logic(problem_desc, model="deepseek-flash"):
         p_in, p_out = 0.30, 1.20
 
     print(f"[Logic] 難関ロジックの解析を開始 ({api_model})...", file=sys.stderr)
+    can_proceed, gov = check_frugal_guard(api_model, est_in=1000, est_out=2000, frugal=frugal)
+    if not can_proceed:
+        return
 
     if DEEPSEEK_API_KEY:
         # DeepSeek API (deepseek-v4-pro / deepseek-flash)
@@ -710,6 +779,7 @@ def handle_logic(problem_desc, model="deepseek-flash"):
                 cost_usd = ((in_tok - c_hit) * p_in + c_hit * (p_in * 0.25) + out_tok * p_out) / 1_000_000
                 cost_jpy = cost_usd * USD_JPY
                 print(f"\n[コスト情報] モデル: {api_model} | 入力: {in_tok} (キャッシュヒット: {c_hit}) | 出力: {out_tok} | 概算費用: 約{cost_jpy:.2f}円 (${cost_usd:.4f})")
+                record_frugal_spend(gov, api_model, in_tok, out_tok, cache_hit=c_hit, cost_jpy=cost_jpy, cost_usd=cost_usd, desc="Logic problem solving")
                 return
         except urllib.error.HTTPError as e:
             err_msg = e.read().decode("utf-8", errors="replace")
@@ -754,8 +824,11 @@ def handle_logic(problem_desc, model="deepseek-flash"):
         sys.exit(EXIT_API_FAILURE)
 
 
-def handle_architect(problem_desc, model="deepseek-v4-pro"):
+def handle_architect(problem_desc, model="deepseek-v4-pro", frugal=False):
     is_gemini_model = model.startswith("gemini")
+    can_proceed, gov = check_frugal_guard(model, est_in=1500, est_out=2500, frugal=frugal)
+    if not can_proceed:
+        return
 
     system_instruction = """You are a Principal Software Architect and Chief Technical Strategist acting as the Commander of an autonomous AI engineering team.
 Your mission:
@@ -813,6 +886,7 @@ Output your architectural specifications and subagent dispatch instructions in c
                 cost_usd = (in_tok * 2.0 + out_tok * 10.0) / 1_000_000
                 cost_jpy = cost_usd * USD_JPY
                 print(f"\n[コスト情報] モデル: {target_model} | 入力: {in_tok} | 出力: {out_tok} | 概算費用: 約{cost_jpy:.2f}円 (${cost_usd:.4f})")
+                record_frugal_spend(gov, target_model, in_tok, out_tok, cost_jpy=cost_jpy, cost_usd=cost_usd, desc="Architect design (Gemini)")
         except urllib.error.HTTPError as e:
             err_msg = e.read().decode("utf-8", errors="replace")
             print(f"[Error] Gemini APIエラー ({e.code}): {err_msg}", file=sys.stderr)
@@ -877,6 +951,7 @@ Output your architectural specifications and subagent dispatch instructions in c
                 cost_usd = ((in_tok - c_hit) * 0.43 + c_hit * (0.43 * 0.25) + out_tok * 0.87) / 1_000_000
                 cost_jpy = cost_usd * USD_JPY
                 print(f"\n[コスト情報] モデル: {target_model} | 入力: {in_tok} (キャッシュヒット: {c_hit}) | 出力: {out_tok} | 概算費用: 約{cost_jpy:.2f}円 (${cost_usd:.4f})")
+                record_frugal_spend(gov, target_model, in_tok, out_tok, cache_hit=c_hit, cost_jpy=cost_jpy, cost_usd=cost_usd, desc="Architect design (DeepSeek)")
                 return
         except urllib.error.HTTPError as e:
             err_msg = e.read().decode("utf-8", errors="replace")
@@ -1196,6 +1271,8 @@ def main():
     p_rev.add_argument("--deep", action="store_true", help="Claudeの拡張思考（Extended Thinking: デフォルト2048トークン）を有効化して深層監査する")
     p_rev.add_argument("--thinking-budget", type=int, default=2048, help="深層思考時の思考トークン予算（デフォルト: 2048、最小1024）")
     p_rev.add_argument("--dry-run", action="store_true", help="API呼び出しを行わず、差分パッケージと送信対象モデルを表示して終了する")
+    p_rev.add_argument("--frugal", action="store_true", help="けち大学生モード：月額100円上限ガバナーを有効化し、予算超過時の有料SOTA呼び出しをブロック")
+
 
     p_arch = subparsers.add_parser("architect", help="初期設計・仕様策定や、Flashスタック時の高難度エスカレーション（DeepSeek V4 Pro 仮想Commander / Gemini 4 Argon）")
     p_arch.add_argument("problem", nargs="?", default="", help="要件定義、アーキテクチャ設計課題、またはスタックした問題のプロンプト（--file と併用時はその前に付与）")
@@ -1249,12 +1326,16 @@ def main():
     # Options for English bridge
     p_rev.add_argument("--no-english-bridge", action="store_true", help="Bypass English optimization bridge")
     p_arch.add_argument("--no-english-bridge", action="store_true", help="Bypass English optimization bridge")
+    p_arch.add_argument("--frugal", action="store_true", help="けち大学生モード：月額100円上限ガバナーを有効化し、予算超過時の有料SOTA呼び出しをブロック")
+
     p_log.add_argument("--no-english-bridge", action="store_true", help="Bypass English optimization bridge")
+    p_log.add_argument("--frugal", action="store_true", help="けち大学生モード：月額100円上限ガバナーを有効化し、予算超過時の有料SOTA呼び出しをブロック")
+
 
     args = parser.parse_args()
 
     if args.command == "review":
-        handle_review(args.path, model=args.model, deep=args.deep, thinking_budget=args.thinking_budget, dry_run=args.dry_run)
+        handle_review(args.path, model=args.model, deep=args.deep, thinking_budget=args.thinking_budget, dry_run=args.dry_run, frugal=getattr(args, 'frugal', False))
     elif args.command == "architect":
         problem_text = args.problem or ""
         if args.file:
@@ -1273,7 +1354,7 @@ def main():
             print("[Error] 問題プロンプトが指定されていません（引数または --file で指定してください）。", file=sys.stderr)
             sys.exit(EXIT_USAGE_ERROR)
 
-        handle_architect(problem_text, model=args.model)
+        handle_architect(problem_text, model=args.model, frugal=getattr(args, 'frugal', False))
     elif args.command == "logic":
         problem_text = args.problem or ""
         if args.file:
@@ -1292,7 +1373,7 @@ def main():
             print("[Error] 問題プロンプトが指定されていません（引数または --file で指定してください）。", file=sys.stderr)
             sys.exit(EXIT_USAGE_ERROR)
 
-        handle_logic(problem_text, model=args.model)
+        handle_logic(problem_text, model=args.model, frugal=getattr(args, 'frugal', False))
     elif args.command == "vision":
         code = handle_vision(
             image_path=args.image,

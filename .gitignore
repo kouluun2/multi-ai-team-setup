@@ -16,6 +16,7 @@ htmlcov/
 
 # Local cache stores & temporary files
 .cache_store.json
+.frugal_ledger.json
 desktop_screen_fast.jpg
 *.tmp
 *.log

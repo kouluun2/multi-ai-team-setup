@@ -2,7 +2,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 74 Passed](https://img.shields.io/badge/tests-74%20passed-brightgreen.svg)]()
+[![Tests: 103 Passed](https://img.shields.io/badge/tests-103%20passed-brightgreen.svg)]()
 [![Hardware: RTX 4070 SUPER](https://img.shields.io/badge/GPU-RTX%204070%20SUPER%2012GB-76B900.svg)]()
 
 > **「自宅GPU（0msローカル推論） × 最先端クラウド5大AI」で個人開発を極限まで加速する、1 HQ + 5 Tiers マルチAI協調開発環境**
@@ -123,12 +123,80 @@ Gemini 3.8 Flash が親エージェントとなる場合、複雑な仕様策定
 
 ---
 
+## 🎓 けち大学生のAI開発環境（月額100円未満でSOTAを叩き出す超節約術）
+
+### 「なぜChatGPT PlusやClaude Pro（月額3,000円〜）を払わずに済むのか？」
+生成AIでの開発において、「とりあえずChatGPT PlusやClaude Pro（月額$20 ＝ 約3,100円〜）」に課金している学生は多いはずです。しかし、このサブスクには大きな落とし穴があります。
+1. **年間37,000円以上の固定費**: アルバイト代や生活費を圧迫する重い負担。
+2. **Tabキー補完に使えない**: Web UIや公式アプリのサブスクは、VS Codeなどのエディタ入力補完（<20ms）には連携できません。
+3. **雑に投げるとすぐ制限（Rate Limit）**: チャット欄に丸ごとコードを貼ると、数回のやり取りで「3時間お待ちください」と止められます。
+
+本リポジトリの**「3層ハイブリッド節約戦略」**を導入すれば、日常のコーディング・デバッグ・仕様調査の**95%以上を完全無料枠（0円）**で捌き、どうしても解けない難所だけ有料SOTAモデルへピンポイントに数円課金する運用が可能です。
+
+---
+
+### 3層ハイブリッド節約戦略（The 3-Tier Frugal Strategy）
+
+```mermaid
+flowchart TD
+    Task[開発タスク / 課題 / 研究コード] --> Classify{タスクの難易度と性質}
+
+    Classify -->|エディタリアルタイムTab補完| T0["Tier 0: 自宅GPU RTX 4070S<br>Qwen 2.5 Coder 1.5B (Ollama)<br><b>費用: 完全0円 (遅延 <20ms)</b>"]
+    Classify -->|日常のコード生成・修正・テスト| T1["Tier 1: Google AI Studio 無料枠<br>Gemini 3.8 Flash High (1500回/日)<br><b>費用: 完全0円</b>"]
+    Classify -->|仕様書・論文・公式ドキュメント調査| HQ["Ground Truth HQ: Gemini Notebook<br>NotebookLM MCP<br><b>費用: 完全0円 (枠内利用)</b>"]
+    Classify -->|2回以上スタックした難関バグ| T2A["Tier 2A: DeepSeek V4 Pro 1.6T MoE<br>1回あたり約0.05〜0.2円<br><b>月数回でも数円</b>"]
+    Classify -->|マイルストーン完了時の最終監査| T2B["Tier 2B: Claude Opus 5.5<br>Diff-Only ピンポイント監査<br><b>1回約1〜2円</b>"]
+```
+
+1. **Tier 0（自宅GPU推論・完全無料）**:
+   - RTX 4070 SUPER（または手持ちのGPU/CPU）上で Ollama（`qwen2.5-coder:1.5b`）を起動。
+   - VS CodeのTabキー補完を月何千回・何万回叩いても**完全0円**（電気代のみ）。
+2. **Tier 1（大容量クラウド推論・完全無料）**:
+   - Google AI Studioで無料発行できるGemini APIキーを活用。
+   - `Gemini 3.8 Flash High`（1日あたり1,500リクエスト無料）で日常のコーディング、リファクタリング、単体テストを無制限に回す。
+   - 公式ドキュメントや論文調査は `Gemini Notebook`（NotebookLM MCP）でグラウンディングし、ハルシネーションをゼロ化。
+3. **Tier 2（ピンポイント従量課金・1回数銭〜数円）**:
+   - **難関バグ・競合状態**: `DeepSeek V4.1 Flash` ($0.30/$1.20) または `DeepSeek V4 Pro` ($0.43/$0.87) へ相談。1回あたり**わずか約0.05円〜0.2円**。
+   - **完成マイルストーン監査**: コード全体ではなく `git diff`（約500トークン）のみを `Claude Opus 5.5` に送信してセキュリティ監査。1回あたり**わずか約1.5〜1.9円**。
+
+---
+
+### 📊 月間コストシミュレーション（大学課題・研究・個人開発を毎日回した場合）
+
+大学生が平日も休日も毎日フルにAI開発環境を稼働させた場合のリアルな月間シミュレーションです（`python student_frugal_guide.py simulate` で算出可能）。
+
+| 階層 / 開発タスク | 採用モデル・基盤 | 月間処理量 (目安) | 1回あたり費用 | 月間総額 (円) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Tier 0 (Local GPU)**<br>VS CodeリアルタイムTabキー補完 | **RTX 4070 SUPER**<br>`Qwen 2.5 Coder 1.5B` | **6,000 回**<br>(1日200回 × 30日) | **0.00 円** | **0.00 円** |
+| **Tier 1 (Executor)**<br>日常のコード生成・修正・単体テスト | **Gemini 3.8 Flash High**<br>`Model: 'flash'` | **900 回**<br>(1日30回 × 30日) | **0.00 円** | **0.00 円** |
+| **HQ (Ground Truth)**<br>公式仕様書・論文・ライブラリ調査 | **Gemini Notebook**<br>`gemini-notebook-mcp` | **300 回**<br>(1日10回 × 30日) | **0.00 円** | **0.00 円** |
+| **Tier 2A (Defense Line)**<br>難関アルゴリズム・デバッグ解決 | **DeepSeek V4 Pro**<br>`deepseek-v4-pro` (1.6T MoE) | **12 回**<br>(週3回程度スタック) | 約 0.22 円 | **2.58 円** |
+| **Tier 2B (Red Team)**<br>マイルストーン最終差分セキュリティ監査 | **Claude Opus 5.5**<br>`claude-opus-5-5` (Diff-Only) | **3 回**<br>(機能完成コミット時) | 約 1.92 円 | **5.77 円** |
+| **合計** | **マルチAIチーム 30日間フル稼働** | **7,215 回** | — | **約 8.35 円 / 月** |
+
+> [!TIP]
+> **缶コーヒー1本（140円）どころか、うまい棒（15円）より安い！**
+> 月額3,100円のChatGPT Plusを契約し続ける場合と比べ、**毎月約3,092円（年間約37,000円）**がそのまま手元に残ります。
+
+---
+
+### 🛡 月額100円上限ガバナー（`student_frugal_guide.py`）
+
+うっかり課金や無限ループによる破産を防ぐため、本環境には**月額100円強制ストッパー（`BudgetGovernor`）**が標準搭載されています。
+
+- **残高リアルタイム追跡**: API利用ごとに `.frugal_ledger.json` にトークン数と円換算コストを自動記録。
+- **100円超過時の安全遮断**: 月間累計利用額が100円（変更可能）に達した場合、有料SOTA APIの実行を物理的にブロックし、無料枠（Gemini Flash / ローカルOllama）へ強制フォールバック。
+- **ゲートキーパー統合**: `ai_team_gate.py` に `--frugal` フラグを付与するだけで、予算監視が自動で連動。
+
+---
+
 ## 🛠 収録モジュール・ツール群
 
 | ファイル / ディレクトリ | 主な役割・機能 |
 | :--- | :--- |
 | **`GEMINI.md`** | マルチAIチーム協調アーキテクチャ、Zero-Code原則、品質ゲートの公式ルール定義 |
-| **`ai_team_gate.py`** | ゲートキーパーCLI本体（型チェック・テスト一括実行、差分レビュー、ロジック解決、アーキテクト設計） |
+| **`student_frugal_guide.py`** | **【新機能】けち大学生用AI環境CLI（月額100円ガバナー、コスト計算、健全性診断、シミュレーター）** |
+| **`ai_team_gate.py`** | ゲートキーパーCLI本体（型チェック・テスト一括実行、差分レビュー、ロジック解決、アーキテクト設計、`--frugal` 連携） |
 | **`ai_team_gate_contracts.py`** | ゲートキーパーの終了コード（Exit Codes）および実行規約定義 |
 | **`english_optimization_bridge.py`** | 日本語指示文を高密度英語プロンプトへ自動変換する推論最適化ブリッジ |
 | **`llm_router.py`** | ローカルGPU（Ollama）とクラウド（Gemini/DeepSeek）を動的に振り分けるインテリジェントルーター |
@@ -143,7 +211,7 @@ Gemini 3.8 Flash が親エージェントとなる場合、複雑な仕様策定
 | ├─ `local-voice-narrator/` | VOICEVOX / faster-whisper ローカル音声合成・文字起こしスキル |
 | ├─ `notebook-grounding-sync/` | Gemini Notebook グラウンディング同期スキル |
 | └─ `x-zenn-publisher/` | 技術記事（Zenn）＆ Xポスト自動生成スキル |
-| **`tests/`** | 全モジュールの自動単体テストスイート（74テスト全通過） |
+| **`tests/`** | 全モジュールの自動単体テストスイート（103テスト全通過） |
 | **`articles/`** | 開発環境のアーキテクチャ設計・詳細解説記事（Zenn公開用マークダウン） |
 
 ---
@@ -184,12 +252,31 @@ OLLAMA_API_BASE=http://127.0.0.1:11434
 ### 4. 単体テストの実行
 ```bash
 pytest tests/
-# 74 passed in ~1s
+# 103 passed in ~5s
 ```
 
 ---
 
 ## 💻 CLIコマンド使用例
+
+### 0. けち大学生の予算ガバナー＆健全性診断（月額100円AI運用）
+```powershell
+# 1. ローカルOllamaと無料枠APIキーの稼働状況を総合診断
+python student_frugal_guide.py doctor
+
+# 2. 差分ピンポイント監査（500トークン）の概算費用を計算
+python student_frugal_guide.py calc --diff 500 --model claude-opus-5-5
+
+# 3. 当月の累計利用額と残高ステータスを確認
+python student_frugal_guide.py status
+
+# 4. 30日間の月間コストシミュレーションを実行（缶コーヒー比較）
+python student_frugal_guide.py simulate --days 30
+
+# 5. 月額100円上限ガバナーを有効化してゲートキーパーを実行（超過時は有料呼び出しを安全に遮断）
+python ai_team_gate.py review --frugal
+python ai_team_gate.py logic "並行処理キューのデッドロック解消" --frugal
+```
 
 ### 1. 機械的品質チェック（静的型・Linter・テスト一括検証）
 ```powershell
